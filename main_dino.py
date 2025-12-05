@@ -160,41 +160,15 @@ def train_dino(args):
         args.local_crops_number,
     )
 
-    if os.path.isdir(args.data_path):
-        tar_pattern = os.path.join(args.data_path, "*.tar")
-        tar_files = glob.glob(tar_pattern)
-    else:
-        tar_files = []
+    # 我们假设 data_path 是一个目录，例如:
+    #   /home/ubuntu/data/train_ccXm_clean
+    # 里面包含 shard-000000.tar ... shard-000220.tar
+    tar_pattern = os.path.join(args.data_path, "shard-*.tar")
+    shard_urls = sorted(glob.glob(tar_pattern))
 
-    if len(tar_files) > 0:
-        print(f"Found {len(tar_files)} tar shards in {args.data_path}, using WebDataset.")
-        dataset = (
-            wds.WebDataset(tar_files)
-            .shuffle(1000)
-            .decode("pil")
-            .to_tuple("jpg")
-            .map(lambda sample: (transform(sample[0]), 0))
-        )
-
-        if args.num_samples is not None and args.num_samples > 0:
-            dataset = dataset.with_length(args.num_samples)
-        else:
-            raise ValueError(
-                "Using WebDataset but --num_samples is not set or <= 0. "
-                "For inat_414k, run with e.g. --num_samples 414000."
-            )
-
-        data_loader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=args.batch_size_per_gpu,
-            num_workers=args.num_workers,
-            pin_memory=True,
-            drop_last=True,
-        )
-        sampler = None
-        print(f"Data loaded from WebDataset: pattern = {tar_pattern}")
-
-    else:
+    if len(shard_urls) == 0:
+        # 如果没找到 shard，就退回到普通的 ImageFolder 逻辑
+        print(f"[WARN] No shards found under {tar_pattern}, falling back to ImageFolder.")
         dataset = SafeImageFolder(args.data_path, transform=transform)
         sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
         data_loader = torch.utils.data.DataLoader(
@@ -205,7 +179,43 @@ def train_dino(args):
             pin_memory=True,
             drop_last=True,
         )
-        print(f"Data loaded: there are {len(dataset)} images.")
+        print(f"Data loaded: there are {len(dataset)} images (ImageFolder).")
+    else:
+        print(f"Found {len(shard_urls)} tar shards in {args.data_path}, using WebDataset with DDP sharding.")
+
+        if args.num_samples is None or args.num_samples <= 0:
+            raise ValueError(
+                "Using WebDataset but --num_samples is not set or <= 0. "
+                "For ccXm_clean, set e.g. --num_samples 1000000."
+            )
+
+        # WebDataset DataPipeline with proper sharding:
+        #   - split_by_node: 不同 DDP rank 拿不同 shard
+        #   - split_by_worker: 同一进程里的不同 dataloader worker 再切分
+        dataset = wds.DataPipeline(
+            wds.SimpleShardList(shard_urls),
+            wds.split_by_node,
+            wds.split_by_worker,
+            wds.tarfile_to_samples(),
+            wds.shuffle(1000),
+            wds.decode("pil"),
+            wds.to_tuple("jpg"),
+            wds.map(lambda sample: (transform(sample[0]), 0)),
+        )
+
+        # 告诉 WebDataset 这个 pipeline 的「样本总数」，方便 len(data_loader)
+        dataset = dataset.with_length(args.num_samples)
+
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=args.batch_size_per_gpu,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+        sampler = None
+        print(f"Data loaded from WebDataset: pattern = {tar_pattern}, num_samples = {args.num_samples}.")
+
 
 
     # ============ building student and teacher networks ... ============
