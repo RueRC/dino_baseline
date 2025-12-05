@@ -627,31 +627,45 @@ class DataAugmentationDINO(object):
         ])
         normalize = transforms.Compose([
             transforms.ToTensor(),
+            # 这里用你之前算好的 96×96 数据集的 mean/std
             transforms.Normalize(
                 (0.492887020111084, 0.5186915397644043, 0.4681483805179596),
                 (0.21510154008865356, 0.21459369361400604, 0.2571362257003784)
             ),
         ])
 
-        # first global crop
+        # ===== 两个 global view：对应原版的 224×224，这里变成 96×96 =====
         self.global_transfo1 = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=global_crops_scale, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(
+                96,                          # 输出分辨率：96×96（你的最大分辨率）
+                scale=global_crops_scale,    # 默认 (0.4, 1.0)，和原版一致
+                interpolation=Image.BICUBIC
+            ),
             flip_and_color_jitter,
             utils.GaussianBlur(1.0),
             normalize,
         ])
-        # second global crop
+
         self.global_transfo2 = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=global_crops_scale, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(
+                96,
+                scale=global_crops_scale,
+                interpolation=Image.BICUBIC
+            ),
             flip_and_color_jitter,
             utils.GaussianBlur(0.1),
             utils.Solarization(0.2),
             normalize,
         ])
-        # transformation for the local small crops
+
+        # ===== local views：对应原版的 96×96，这里缩成 64×64 =====
         self.local_crops_number = local_crops_number
         self.local_transfo = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(
+                64,                          # 小图：64×64
+                scale=local_crops_scale,     # 默认 (0.05, 0.4)，和原版一致
+                interpolation=Image.BICUBIC
+            ),
             flip_and_color_jitter,
             utils.GaussianBlur(p=0.5),
             normalize,
@@ -659,8 +673,10 @@ class DataAugmentationDINO(object):
 
     def __call__(self, image):
         crops = []
+        # 两个 global crop
         crops.append(self.global_transfo1(image))
         crops.append(self.global_transfo2(image))
+        # 多个 local crop
         for _ in range(self.local_crops_number):
             crops.append(self.local_transfo(image))
         return crops
