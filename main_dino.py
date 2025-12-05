@@ -143,6 +143,14 @@ def get_args_parser():
         help='Run k-NN eval every N epochs. 0 means disable.')
     parser.add_argument('--eval_knn_k', default=20, type=int,
         help='k for k-NN eval.')
+
+    parser.add_argument('--eval_cub_path', default="/home/ubuntu/data/eval_cub/data", type=str,
+        help='Root of CUB eval data.')
+    parser.add_argument('--eval_imgnet_path', default="/home/ubuntu/data/eval_imgnet/data", type=str,
+        help='Root of ImageNet-mini eval data.')
+    parser.add_argument('--eval_sun_path', default="/home/ubuntu/data/eval_sun/data", type=str,
+        help='Root of SUN eval data.')
+    
     return parser
 
 
