@@ -160,14 +160,11 @@ def train_dino(args):
         args.local_crops_number,
     )
 
-    # 我们假设 data_path 是一个目录，例如:
     #   /home/ubuntu/data/train_ccXm_clean
-    # 里面包含 shard-000000.tar ... shard-000220.tar
     tar_pattern = os.path.join(args.data_path, "shard-*.tar")
     shard_urls = sorted(glob.glob(tar_pattern))
 
     if len(shard_urls) == 0:
-        # 如果没找到 shard，就退回到普通的 ImageFolder 逻辑
         print(f"[WARN] No shards found under {tar_pattern}, falling back to ImageFolder.")
         dataset = SafeImageFolder(args.data_path, transform=transform)
         sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
@@ -190,8 +187,6 @@ def train_dino(args):
             )
 
         # WebDataset DataPipeline with proper sharding:
-        #   - split_by_node: 不同 DDP rank 拿不同 shard
-        #   - split_by_worker: 同一进程里的不同 dataloader worker 再切分
         dataset = wds.DataPipeline(
             wds.SimpleShardList(shard_urls),
             wds.split_by_node,
@@ -203,7 +198,6 @@ def train_dino(args):
             wds.map(lambda sample: (transform(sample[0]), 0)),
         )
 
-        # 告诉 WebDataset 这个 pipeline 的「样本总数」，方便 len(data_loader)
         dataset = dataset.with_length(args.num_samples)
 
         data_loader = torch.utils.data.DataLoader(
