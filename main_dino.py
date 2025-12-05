@@ -160,7 +160,6 @@ def train_dino(args):
         args.local_crops_number,
     )
 
-    # 如果 data_path 目录下存在 .tar，就用 WebDataset 读取
     if os.path.isdir(args.data_path):
         tar_pattern = os.path.join(args.data_path, "*.tar")
         tar_files = glob.glob(tar_pattern)
@@ -171,13 +170,12 @@ def train_dino(args):
         print(f"Found {len(tar_files)} tar shards in {args.data_path}, using WebDataset.")
         dataset = (
             wds.WebDataset(tar_files)
-            .shuffle(1000)              # 可选，但推荐，打乱一下
+            .shuffle(1000)
             .decode("pil")
-            .to_tuple("jpg")            # 如果你 key 不是 jpg，这里改成对应的
-            .map(lambda sample: (transform(sample[0]), 0))  # 返回 (crops, dummy_label)
+            .to_tuple("jpg")
+            .map(lambda sample: (transform(sample[0]), 0))
         )
 
-        # ⭐ 关键：给 WebDataset 补一个“长度”，让 len(dataset) 和 len(data_loader) 有定义
         if args.num_samples is not None and args.num_samples > 0:
             dataset = dataset.with_length(args.num_samples)
         else:
@@ -197,7 +195,6 @@ def train_dino(args):
         print(f"Data loaded from WebDataset: pattern = {tar_pattern}")
 
     else:
-        # 回退到普通 ImageFolder 逻辑
         dataset = SafeImageFolder(args.data_path, transform=transform)
         sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
         data_loader = torch.utils.data.DataLoader(
@@ -520,11 +517,10 @@ class SafeImageFolder(torch.utils.data.Dataset):
         self.class_to_idx = {}
         self.samples = []
 
-        skipped = []  # è®°å½•è¢«è·³è¿‡çš„ç©ºç±»ï¼Œæ–¹ä¾¿ä½  debug
+        skipped = []
 
         for cls_name in classes:
             cls_dir = os.path.join(root, cls_name)
-            # ä¸´æ—¶æ”¶é›†è¿™ä¸ªç±»çš„æ‰€æœ‰å›¾ç‰‡
             cls_samples = []
             for r, _, fnames in os.walk(cls_dir):
                 for fname in sorted(fnames):
@@ -534,9 +530,8 @@ class SafeImageFolder(torch.utils.data.Dataset):
 
             if len(cls_samples) == 0:
                 skipped.append(cls_name)
-                continue  # è¿™ä¸ªç±»æ˜¯ç©ºçš„ï¼Œç›´æŽ¥æ— è§†
+                continue
 
-            # ç»™è¿™ä¸ªéžç©ºç±»åˆ†é…æ–°çš„ class idx
             cls_idx = len(self.classes)
             self.classes.append(cls_name)
             self.class_to_idx[cls_name] = cls_idx
