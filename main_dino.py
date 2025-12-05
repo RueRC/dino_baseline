@@ -380,14 +380,22 @@ def train_dino(args):
                 for name, root in eval_datasets:
                     try:
                         print(f"[kNN-{name}] Running kNN eval at epoch {epoch+1} on {root} ...")
-                        top1 = run_knn_eval(
-                            ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
-                            eval_root=root,
-                            device="cuda",
-                            k=args.eval_knn_k,
-                        )
+                        datasets = {
+                            "cub": "/home/ubuntu/data/eval_cub/data",
+                            "imgnet": "/home/ubuntu/data/eval_imgnet/data",
+                            "sun": "/home/ubuntu/data/eval_sun/data",
+                        }
+                        
+                        for name, path in datasets.items():
+                            print(f"[kNN] Running {name} eval at epoch {epoch+1} ...")
+                            score = run_knn_eval(
+                                ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
+                                eval_root=path,
+                                device="cuda",
+                                k=args.eval_knn_k,
+                            )
                         print(f"[kNN-{name}] Epoch {epoch+1}: k={args.eval_knn_k}, Top1={top1:.2f}%")
-                        log_stats[f'knn_top1_{name}_k{args.eval_knn_k}'] = float(top1)
+                        log_stats[f'knn_top1_{name}_k{args.eval_knn_k}'] = float(score)
                     except Exception as e:
                         print(f"[kNN-{name}] Eval failed at epoch {epoch+1}: {e}")
 
