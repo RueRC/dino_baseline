@@ -437,23 +437,49 @@ def train_dino(args):
 
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
-                    optimizer, lr_schedule, wd_schedule, momentum_schedule,epoch,
-                    fp16_scaler, args):
+                    optimizer, lr_schedule, wd_schedule, momentum_schedule,
+                    epoch, fp16_scaler, args):
+    """
+    关键改动：
+    - 不再 `for (images, _) in data_loader`，改成手动控制迭代次数 = len(data_loader)
+    - 如果某个 rank 的 DataLoader 提前 StopIteration，就重新创建 iter 继续取数据
+    - 这样每个 rank 在每个 epoch 都执行完全相同数量的 step / all_reduce 调用
+    """
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
-    for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+
+    # 每个 epoch 固定的 iteration 数（所有 rank 一样）
+    iters_per_epoch = len(data_loader)
+
+    # 为当前 epoch 创建一个迭代器
+    data_iter = iter(data_loader)
+
+    # 用 range(iters_per_epoch) 包一层，方便继续用 MetricLogger.log_every
+    for it in metric_logger.log_every(range(iters_per_epoch), 10, header):
+        # global training iteration index，和 lr_schedule / wd_schedule 对齐
+        global_it = epoch * iters_per_epoch + it
+
+        # 这里手动从 data_iter 取 batch，如耗尽则重新开始
+        try:
+            images, _ = next(data_iter)
+        except StopIteration:
+            # 当前 rank 的数据耗尽，重新开始一个新的 epoch 流
+            data_iter = iter(data_loader)
+            images, _ = next(data_iter)
+
         # update weight decay and learning rate according to their schedule
-        it = len(data_loader) * epoch + it  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
-            param_group["lr"] = lr_schedule[it]
+            param_group["lr"] = lr_schedule[global_it]
             if i == 0:  # only the first group is regularized
-                param_group["weight_decay"] = wd_schedule[it]
+                param_group["weight_decay"] = wd_schedule[global_it]
 
         # move images to gpu
         images = [im.cuda(non_blocking=True) for im in images]
+
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
-            teacher_output = teacher(images[:2])  # only the 2 global views pass through the teacher
+            # only the 2 global views pass through the teacher
+            teacher_output = teacher(images[:2])
             student_output = student(images)
             loss = dino_loss(student_output, teacher_output, epoch)
 
@@ -474,7 +500,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         else:
             fp16_scaler.scale(loss).backward()
             if args.clip_grad:
-                fp16_scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
+                # unscale the gradients of optimizer's assigned params in-place
+                fp16_scaler.unscale_(optimizer)
                 param_norms = utils.clip_gradients(student, args.clip_grad)
             utils.cancel_gradients_last_layer(epoch, student,
                                               args.freeze_last_layer)
@@ -483,7 +510,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
 
         # EMA update for the teacher
         with torch.no_grad():
-            m = momentum_schedule[it]  # momentum parameter
+            m = momentum_schedule[global_it]  # momentum parameter for this step
             for param_q, param_k in zip(student.module.parameters(), teacher_without_ddp.parameters()):
                 param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
 
@@ -492,10 +519,12 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         metric_logger.update(loss=loss.item())
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
 
 
 class DINOLoss(nn.Module):
