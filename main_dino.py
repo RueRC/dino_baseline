@@ -366,21 +366,30 @@ def train_dino(args):
         #         f.write(json.dumps(log_stats) + "\n")
         
         if utils.is_main_process():
-            # ====== eval_every x epoch kNN eval ======
-            if args.eval_data_path is not None and args.eval_every > 0:
-                if (epoch + 1) % args.eval_every == 0:
+            # ====== eval_every x epoch kNN eval on multiple datasets ======
+            if args.eval_every > 0 and (epoch + 1) % args.eval_every == 0:
+                eval_datasets = []
+
+                if args.eval_cub_path is not None:
+                    eval_datasets.append(("cub", args.eval_cub_path))
+                if args.eval_imgnet_path is not None:
+                    eval_datasets.append(("imgnet", args.eval_imgnet_path))
+                if args.eval_sun_path is not None:
+                    eval_datasets.append(("sun", args.eval_sun_path))
+
+                for name, root in eval_datasets:
                     try:
-                        print(f"[kNN] Running kNN eval at epoch {epoch+1} ...")
+                        print(f"[kNN-{name}] Running kNN eval at epoch {epoch+1} on {root} ...")
                         top1 = run_knn_eval(
                             ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
-                            eval_root=args.eval_data_path,
+                            eval_root=root,
                             device="cuda",
                             k=args.eval_knn_k,
                         )
-                        print(f"[kNN] Epoch {epoch+1}: k={args.eval_knn_k}, Top1={top1:.2f}%")
-                        log_stats[f'knn_top1_k{args.eval_knn_k}'] = float(top1)
+                        print(f"[kNN-{name}] Epoch {epoch+1}: k={args.eval_knn_k}, Top1={top1:.2f}%")
+                        log_stats[f'knn_top1_{name}_k{args.eval_knn_k}'] = float(top1)
                     except Exception as e:
-                        print(f"[kNN] Eval failed at epoch {epoch+1}: {e}")
+                        print(f"[kNN-{name}] Eval failed at epoch {epoch+1}: {e}")
 
             with (Path(args.output_dir) / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
