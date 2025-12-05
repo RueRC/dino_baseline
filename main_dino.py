@@ -627,10 +627,9 @@ class DataAugmentationDINO(object):
         ])
         normalize = transforms.Compose([
             transforms.ToTensor(),
-            # 这里用你之前算好的 96×96 数据集的 mean/std
             transforms.Normalize(
-                (0.492887020111084, 0.5186915397644043, 0.4681483805179596),
-                (0.21510154008865356, 0.21459369361400604, 0.2571362257003784)
+                (0.485, 0.456, 0.406),
+                (0.229, 0.224, 0.225),
             ),
         ])
 
