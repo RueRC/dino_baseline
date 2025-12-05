@@ -19,6 +19,7 @@ import time
 import math
 import json
 from pathlib import Path
+from torchvision.datasets.folder import default_loader, IMG_EXTENSIONS
 
 import numpy as np
 from PIL import Image
@@ -33,6 +34,10 @@ from torchvision import models as torchvision_models
 import utils
 import vision_transformer as vits
 from vision_transformer import DINOHead
+
+from knn_eval_custom import run_knn_eval
+import webdataset as wds
+import glob
 
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
@@ -123,9 +128,21 @@ def get_args_parser():
     parser.add_argument('--saveckp_freq', default=20, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
     parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
+    parser.add_argument(
+        '--num_samples', type=int, default=None,
+        help="Total number of training images when using WebDataset (e.g., 414000 for inat_414k)."
+    )
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
+    
+    # ===== kNN eval related =====
+    parser.add_argument('--eval_data_path', default=None, type=str,
+        help='Root of eval data. Should contain train/ and val/ subfolders.')
+    parser.add_argument('--eval_every', default=0, type=int,
+        help='Run k-NN eval every N epochs. 0 means disable.')
+    parser.add_argument('--eval_knn_k', default=20, type=int,
+        help='k for k-NN eval.')
     return parser
 
 
@@ -142,17 +159,57 @@ def train_dino(args):
         args.local_crops_scale,
         args.local_crops_number,
     )
-    dataset = datasets.ImageFolder(args.data_path, transform=transform)
-    sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        sampler=sampler,
-        batch_size=args.batch_size_per_gpu,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True,
-    )
-    print(f"Data loaded: there are {len(dataset)} images.")
+
+    # 如果 data_path 目录下存在 .tar，就用 WebDataset 读取
+    if os.path.isdir(args.data_path):
+        tar_pattern = os.path.join(args.data_path, "*.tar")
+        tar_files = glob.glob(tar_pattern)
+    else:
+        tar_files = []
+
+    if len(tar_files) > 0:
+        print(f"Found {len(tar_files)} tar shards in {args.data_path}, using WebDataset.")
+        dataset = (
+            wds.WebDataset(tar_files)
+            .shuffle(1000)              # 可选，但推荐，打乱一下
+            .decode("pil")
+            .to_tuple("jpg")            # 如果你 key 不是 jpg，这里改成对应的
+            .map(lambda sample: (transform(sample[0]), 0))  # 返回 (crops, dummy_label)
+        )
+
+        # ⭐ 关键：给 WebDataset 补一个“长度”，让 len(dataset) 和 len(data_loader) 有定义
+        if args.num_samples is not None and args.num_samples > 0:
+            dataset = dataset.with_length(args.num_samples)
+        else:
+            raise ValueError(
+                "Using WebDataset but --num_samples is not set or <= 0. "
+                "For inat_414k, run with e.g. --num_samples 414000."
+            )
+
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=args.batch_size_per_gpu,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+        sampler = None
+        print(f"Data loaded from WebDataset: pattern = {tar_pattern}")
+
+    else:
+        # 回退到普通 ImageFolder 逻辑
+        dataset = SafeImageFolder(args.data_path, transform=transform)
+        sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            sampler=sampler,
+            batch_size=args.batch_size_per_gpu,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+        print(f"Data loaded: there are {len(dataset)} images.")
+
 
     # ============ building student and teacher networks ... ============
     # we changed the name DeiT-S for ViT-S to avoid confusions
@@ -267,7 +324,11 @@ def train_dino(args):
     start_time = time.time()
     print("Starting DINO training !")
     for epoch in range(start_epoch, args.epochs):
-        data_loader.sampler.set_epoch(epoch)
+        # 只有在使用 DistributedSampler 时才需要 set_epoch
+        if isinstance(getattr(data_loader, "sampler", None),
+                      torch.utils.data.distributed.DistributedSampler):
+            data_loader.sampler.set_epoch(epoch)
+
 
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
@@ -290,9 +351,32 @@ def train_dino(args):
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch:04}.pth'))
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      'epoch': epoch}
+                     
+        # if utils.is_main_process():
+        #     with (Path(args.output_dir) / "log.txt").open("a") as f:
+        #         f.write(json.dumps(log_stats) + "\n")
+        
         if utils.is_main_process():
+            # ====== eval_every x epoch kNN eval ======
+            if args.eval_data_path is not None and args.eval_every > 0:
+                if (epoch + 1) % args.eval_every == 0:
+                    try:
+                        print(f"[kNN] Running kNN eval at epoch {epoch+1} ...")
+                        top1 = run_knn_eval(
+                            ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
+                            eval_root=args.eval_data_path,
+                            device="cuda",
+                            k=args.eval_knn_k,
+                        )
+                        print(f"[kNN] Epoch {epoch+1}: k={args.eval_knn_k}, Top1={top1:.2f}%")
+                        log_stats[f'knn_top1_k{args.eval_knn_k}'] = float(top1)
+                    except Exception as e:
+                        print(f"[kNN] Eval failed at epoch {epoch+1}: {e}")
+
             with (Path(args.output_dir) / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
+                
+                
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
@@ -416,6 +500,69 @@ class DINOLoss(nn.Module):
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
 
+class SafeImageFolder(torch.utils.data.Dataset):
+    """
+    ImageFolder that silently skips empty class folders.
+    """
+    def __init__(self, root, transform=None, target_transform=None,
+                 loader=default_loader, extensions=IMG_EXTENSIONS):
+        self.root = root
+        self.transform = transform
+        self.target_transform = target_transform
+        self.loader = loader
+        self.extensions = extensions
+
+        # å…ˆæ‰¾å‡ºæ‰€æœ‰ class å­ç›®å½•ï¼ˆåå­—å’Œ ImageFolder ä¸€æ ·ï¼‰
+        classes = [d.name for d in os.scandir(root) if d.is_dir()]
+        classes.sort()
+
+        self.classes = []
+        self.class_to_idx = {}
+        self.samples = []
+
+        skipped = []  # è®°å½•è¢«è·³è¿‡çš„ç©ºç±»ï¼Œæ–¹ä¾¿ä½  debug
+
+        for cls_name in classes:
+            cls_dir = os.path.join(root, cls_name)
+            # ä¸´æ—¶æ”¶é›†è¿™ä¸ªç±»çš„æ‰€æœ‰å›¾ç‰‡
+            cls_samples = []
+            for r, _, fnames in os.walk(cls_dir):
+                for fname in sorted(fnames):
+                    if fname.lower().endswith(tuple(self.extensions)):
+                        path = os.path.join(r, fname)
+                        cls_samples.append(path)
+
+            if len(cls_samples) == 0:
+                skipped.append(cls_name)
+                continue  # è¿™ä¸ªç±»æ˜¯ç©ºçš„ï¼Œç›´æŽ¥æ— è§†
+
+            # ç»™è¿™ä¸ªéžç©ºç±»åˆ†é…æ–°çš„ class idx
+            cls_idx = len(self.classes)
+            self.classes.append(cls_name)
+            self.class_to_idx[cls_name] = cls_idx
+            for path in cls_samples:
+                self.samples.append((path, cls_idx))
+
+        self.targets = [s[1] for s in self.samples]
+
+        if len(self.samples) == 0:
+            raise RuntimeError(f"No valid images found in {root} (all classes empty?).")
+
+        if len(skipped) > 0:
+            print(f"[SafeImageFolder] Skipped {len(skipped)} empty classes, e.g.: {skipped[:10]}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        path, target = self.samples[index]
+        img = self.loader(path)
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return img, target
+
 class DataAugmentationDINO(object):
     def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
         flip_and_color_jitter = transforms.Compose([
@@ -428,19 +575,22 @@ class DataAugmentationDINO(object):
         ])
         normalize = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            transforms.Normalize(
+                (0.492887020111084, 0.5186915397644043, 0.4681483805179596),
+                (0.21510154008865356, 0.21459369361400604, 0.2571362257003784)
+            ),
         ])
 
         # first global crop
         self.global_transfo1 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(96, scale=global_crops_scale, interpolation=Image.BICUBIC),
             flip_and_color_jitter,
             utils.GaussianBlur(1.0),
             normalize,
         ])
         # second global crop
         self.global_transfo2 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(96, scale=global_crops_scale, interpolation=Image.BICUBIC),
             flip_and_color_jitter,
             utils.GaussianBlur(0.1),
             utils.Solarization(0.2),
