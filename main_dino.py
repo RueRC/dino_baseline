@@ -368,57 +368,57 @@ def train_dino(args):
         #     with (Path(args.output_dir) / "log.txt").open("a") as f:
         #         f.write(json.dumps(log_stats) + "\n")
         
-if utils.is_main_process():
-
-    # ====== eval logic: kNN + linear every eval_every epochs ======
-    if args.eval_every > 0 and (epoch + 1) % args.eval_every == 0:
-
-        eval_datasets = {
-            "cub": args.eval_cub_path,
-            "imgnet": args.eval_imgnet_path,
-            "sun": args.eval_sun_path,
-        }
-
-        for name, root in eval_datasets.items():
-            if root is None:
-                continue
-
-            # -------------------- kNN eval --------------------
-            try:
-                print(f"[kNN-{name}] Running kNN eval at epoch {epoch+1} on {root} ...")
-                knn_top1 = run_knn_eval(
-                    ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
-                    eval_root=root,
-                    device="cuda",
-                    k=args.eval_knn_k,
-                )
-                print(f"[kNN-{name}] Epoch {epoch+1}: Top1={knn_top1:.2f}%")
-                log_stats[f'knn_top1_{name}_k{args.eval_knn_k}'] = float(knn_top1)
-            except Exception as e:
-                print(f"[kNN-{name}] Eval failed at epoch {epoch+1}: {e}")
-
-            # -------------------- linear probe eval --------------------
-            # 🔴 每次 eval 都跑 linear
-            try:
-                print(f"[Linear-{name}] Running linear probe eval at epoch {epoch+1} on {root} ...")
-                linear_res = run_linear_eval(
-                    ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
-                    eval_root=root,
-                    device="cuda",
-                    n_last_blocks=4,
-                    avgpool_patchtokens=False,
-                    epochs=100,
-                    batch_size=1024,
-                    num_workers=args.num_workers,
-                    lr=0.1,
-                    momentum=0.9,
-                    weight_decay=0.0,
-                    use_precomputed_features=True,
-                )
-                log_stats[f'linear_best_val_{name}'] = float(linear_res["best_val_acc"])
-                log_stats[f'linear_test_{name}'] = float(linear_res["test_acc"])
-            except Exception as e:
-                print(f"[Linear-{name}] Linear eval failed at epoch {epoch+1}: {e}")
+        if utils.is_main_process():
+        
+            # ====== eval logic: kNN + linear every eval_every epochs ======
+            if args.eval_every > 0 and (epoch + 1) % args.eval_every == 0:
+        
+                eval_datasets = {
+                    "cub": args.eval_cub_path,
+                    "imgnet": args.eval_imgnet_path,
+                    "sun": args.eval_sun_path,
+                }
+        
+                for name, root in eval_datasets.items():
+                    if root is None:
+                        continue
+        
+                    # -------------------- kNN eval --------------------
+                    try:
+                        print(f"[kNN-{name}] Running kNN eval at epoch {epoch+1} on {root} ...")
+                        knn_top1 = run_knn_eval(
+                            ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
+                            eval_root=root,
+                            device="cuda",
+                            k=args.eval_knn_k,
+                        )
+                        print(f"[kNN-{name}] Epoch {epoch+1}: Top1={knn_top1:.2f}%")
+                        log_stats[f'knn_top1_{name}_k{args.eval_knn_k}'] = float(knn_top1)
+                    except Exception as e:
+                        print(f"[kNN-{name}] Eval failed at epoch {epoch+1}: {e}")
+        
+                    # -------------------- linear probe eval --------------------
+                    # 🔴 每次 eval 都跑 linear
+                    try:
+                        print(f"[Linear-{name}] Running linear probe eval at epoch {epoch+1} on {root} ...")
+                        linear_res = run_linear_eval(
+                            ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
+                            eval_root=root,
+                            device="cuda",
+                            n_last_blocks=4,
+                            avgpool_patchtokens=False,
+                            epochs=100,
+                            batch_size=1024,
+                            num_workers=args.num_workers,
+                            lr=0.1,
+                            momentum=0.9,
+                            weight_decay=0.0,
+                            use_precomputed_features=True,
+                        )
+                        log_stats[f'linear_best_val_{name}'] = float(linear_res["best_val_acc"])
+                        log_stats[f'linear_test_{name}'] = float(linear_res["test_acc"])
+                    except Exception as e:
+                        print(f"[Linear-{name}] Linear eval failed at epoch {epoch+1}: {e}")
 
 
             # write log
