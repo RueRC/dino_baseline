@@ -368,61 +368,58 @@ def train_dino(args):
         #     with (Path(args.output_dir) / "log.txt").open("a") as f:
         #         f.write(json.dumps(log_stats) + "\n")
         
-        if utils.is_main_process():
+if utils.is_main_process():
 
-            # ====== eval logic: kNN every eval_every, linear every (5 * eval_every) ======
-            if args.eval_every > 0 and (epoch + 1) % args.eval_every == 0:
+    # ====== eval logic: kNN + linear every eval_every epochs ======
+    if args.eval_every > 0 and (epoch + 1) % args.eval_every == 0:
 
-                # 当前是第几次 eval（从 1 开始算）
-                eval_index = (epoch + 1) // args.eval_every
+        eval_datasets = {
+            "cub": args.eval_cub_path,
+            "imgnet": args.eval_imgnet_path,
+            "sun": args.eval_sun_path,
+        }
 
-                eval_datasets = {
-                    "cub": args.eval_cub_path,
-                    "imgnet": args.eval_imgnet_path,
-                    "sun": args.eval_sun_path,
-                }
+        for name, root in eval_datasets.items():
+            if root is None:
+                continue
 
-                for name, root in eval_datasets.items():
-                    if root is None:
-                        continue
+            # -------------------- kNN eval --------------------
+            try:
+                print(f"[kNN-{name}] Running kNN eval at epoch {epoch+1} on {root} ...")
+                knn_top1 = run_knn_eval(
+                    ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
+                    eval_root=root,
+                    device="cuda",
+                    k=args.eval_knn_k,
+                )
+                print(f"[kNN-{name}] Epoch {epoch+1}: Top1={knn_top1:.2f}%")
+                log_stats[f'knn_top1_{name}_k{args.eval_knn_k}'] = float(knn_top1)
+            except Exception as e:
+                print(f"[kNN-{name}] Eval failed at epoch {epoch+1}: {e}")
 
-                    # -------------------- kNN eval --------------------
-                    try:
-                        print(f"[kNN-{name}] Running kNN eval at epoch {epoch+1} on {root} ...")
-                        knn_top1 = run_knn_eval(
-                            ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
-                            eval_root=root,
-                            device="cuda",
-                            k=args.eval_knn_k,
-                        )
-                        print(f"[kNN-{name}] Epoch {epoch+1}: Top1={knn_top1:.2f}%")
-                        log_stats[f'knn_top1_{name}_k{args.eval_knn_k}'] = float(knn_top1)
-                    except Exception as e:
-                        print(f"[kNN-{name}] Eval failed at epoch {epoch+1}: {e}")
+            # -------------------- linear probe eval --------------------
+            # 🔴 每次 eval 都跑 linear
+            try:
+                print(f"[Linear-{name}] Running linear probe eval at epoch {epoch+1} on {root} ...")
+                linear_res = run_linear_eval(
+                    ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
+                    eval_root=root,
+                    device="cuda",
+                    n_last_blocks=4,
+                    avgpool_patchtokens=False,
+                    epochs=100,
+                    batch_size=1024,
+                    num_workers=args.num_workers,
+                    lr=0.1,
+                    momentum=0.9,
+                    weight_decay=0.0,
+                    use_precomputed_features=True,
+                )
+                log_stats[f'linear_best_val_{name}'] = float(linear_res["best_val_acc"])
+                log_stats[f'linear_test_{name}'] = float(linear_res["test_acc"])
+            except Exception as e:
+                print(f"[Linear-{name}] Linear eval failed at epoch {epoch+1}: {e}")
 
-                    # -------------------- linear probe eval --------------------
-                    # 当 eval_index 是 5 的倍数 → 跑 linear probe（也即 epoch 多了 5 * eval_every）
-                    if eval_index % 5 == 0:
-                        try:
-                            print(f"[Linear-{name}] Running linear probe eval at epoch {epoch+1} on {root} ...")
-                            linear_res = run_linear_eval(
-                                ckpt_path=os.path.join(args.output_dir, "checkpoint.pth"),
-                                eval_root=root,
-                                device="cuda",
-                                n_last_blocks=4,
-                                avgpool_patchtokens=False,
-                                epochs=100,
-                                batch_size=1024,
-                                num_workers=args.num_workers,
-                                lr=0.1,
-                                momentum=0.9,
-                                weight_decay=0.0,
-                                use_precomputed_features=True,
-                            )
-                            log_stats[f'linear_best_val_{name}'] = float(linear_res["best_val_acc"])
-                            log_stats[f'linear_test_{name}'] = float(linear_res["test_acc"])
-                        except Exception as e:
-                            print(f"[Linear-{name}] Linear eval failed at epoch {epoch+1}: {e}")
 
             # write log
             with (Path(args.output_dir) / "log.txt").open("a") as f:
@@ -439,31 +436,21 @@ def train_dino(args):
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,
                     epoch, fp16_scaler, args):
-    """
-    关键改动：
-    - 不再 `for (images, _) in data_loader`，改成手动控制迭代次数 = len(data_loader)
-    - 如果某个 rank 的 DataLoader 提前 StopIteration，就重新创建 iter 继续取数据
-    - 这样每个 rank 在每个 epoch 都执行完全相同数量的 step / all_reduce 调用
-    """
+
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
 
-    # 每个 epoch 固定的 iteration 数（所有 rank 一样）
     iters_per_epoch = len(data_loader)
 
-    # 为当前 epoch 创建一个迭代器
     data_iter = iter(data_loader)
 
-    # 用 range(iters_per_epoch) 包一层，方便继续用 MetricLogger.log_every
     for it in metric_logger.log_every(range(iters_per_epoch), 10, header):
         # global training iteration index，和 lr_schedule / wd_schedule 对齐
         global_it = epoch * iters_per_epoch + it
 
-        # 这里手动从 data_iter 取 batch，如耗尽则重新开始
         try:
             images, _ = next(data_iter)
         except StopIteration:
-            # 当前 rank 的数据耗尽，重新开始一个新的 epoch 流
             data_iter = iter(data_loader)
             images, _ = next(data_iter)
 
@@ -662,7 +649,6 @@ class DataAugmentationDINO(object):
             ),
         ])
 
-        # ===== 两个 global view：对应原版的 224×224，这里变成 96×96 =====
         self.global_transfo1 = transforms.Compose([
             transforms.RandomResizedCrop(
                 96,                          # 输出分辨率：96×96（你的最大分辨率）
