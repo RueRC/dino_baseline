@@ -443,7 +443,6 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
     data_iter = iter(data_loader)
 
     for it in metric_logger.log_every(range(iters_per_epoch), 10, header):
-        # global training iteration index，和 lr_schedule / wd_schedule 对齐
         global_it = epoch * iters_per_epoch + it
 
         try:
@@ -580,7 +579,6 @@ class SafeImageFolder(torch.utils.data.Dataset):
         self.loader = loader
         self.extensions = extensions
 
-        # å…ˆæ‰¾å‡ºæ‰€æœ‰ class å­ç›®å½•ï¼ˆåå­—å’Œ ImageFolder ä¸€æ ·ï¼‰
         classes = [d.name for d in os.scandir(root) if d.is_dir()]
         classes.sort()
 
@@ -649,8 +647,8 @@ class DataAugmentationDINO(object):
 
         self.global_transfo1 = transforms.Compose([
             transforms.RandomResizedCrop(
-                96,                          # 输出分辨率：96×96（你的最大分辨率）
-                scale=global_crops_scale,    # 默认 (0.4, 1.0)，和原版一致
+                96,
+                scale=global_crops_scale,
                 interpolation=Image.BICUBIC
             ),
             flip_and_color_jitter,
@@ -670,12 +668,12 @@ class DataAugmentationDINO(object):
             normalize,
         ])
 
-        # ===== local views：对应原版的 96×96，这里缩成 64×64 =====
+
         self.local_crops_number = local_crops_number
         self.local_transfo = transforms.Compose([
             transforms.RandomResizedCrop(
-                64,                          # 小图：64×64
-                scale=local_crops_scale,     # 默认 (0.05, 0.4)，和原版一致
+                64,
+                scale=local_crops_scale, 
                 interpolation=Image.BICUBIC
             ),
             flip_and_color_jitter,
