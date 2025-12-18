@@ -336,7 +336,6 @@ def train_dino(args):
     start_time = time.time()
     print("Starting DINO training !")
     for epoch in range(start_epoch, args.epochs):
-        # 只有在使用 DistributedSampler 时才需要 set_epoch
         if isinstance(getattr(data_loader, "sampler", None),
                       torch.utils.data.distributed.DistributedSampler):
             data_loader.sampler.set_epoch(epoch)
