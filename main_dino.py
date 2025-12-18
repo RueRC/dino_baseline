@@ -398,7 +398,6 @@ def train_dino(args):
                         print(f"[kNN-{name}] Eval failed at epoch {epoch+1}: {e}")
         
                     # -------------------- linear probe eval --------------------
-                    # 🔴 每次 eval 都跑 linear
                     try:
                         print(f"[Linear-{name}] Running linear probe eval at epoch {epoch+1} on {root} ...")
                         linear_res = run_linear_eval(
@@ -687,10 +686,8 @@ class DataAugmentationDINO(object):
 
     def __call__(self, image):
         crops = []
-        # 两个 global crop
         crops.append(self.global_transfo1(image))
         crops.append(self.global_transfo2(image))
-        # 多个 local crop
         for _ in range(self.local_crops_number):
             crops.append(self.local_transfo(image))
         return crops
